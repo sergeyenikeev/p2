@@ -4,6 +4,7 @@
 #include <chrono>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "capture_dxgi.h"
@@ -121,6 +122,33 @@ ImageBuffer MakeTestPattern(uint32_t width, uint32_t height, uint32_t seed) {
     }
   }
   return buffer;
+}
+
+bool IsLikelyBlackFrame(const ImageBuffer& buffer) {
+  if (buffer.width == 0 || buffer.height == 0 || buffer.stride < buffer.width * 4 ||
+      buffer.pixels.empty()) {
+    return true;
+  }
+
+  // Rationale: quick sampling avoids heavy scan but catches fully black frames.
+  const uint32_t samples_x = 8;
+  const uint32_t samples_y = 8;
+  const uint8_t threshold = 8;
+  for (uint32_t sy = 0; sy < samples_y; ++sy) {
+    uint32_t y = buffer.height == 1 ? 0
+                                    : (buffer.height - 1) * sy / (samples_y - 1);
+    const uint8_t* row = buffer.pixels.data() +
+                         static_cast<size_t>(y) * buffer.stride;
+    for (uint32_t sx = 0; sx < samples_x; ++sx) {
+      uint32_t x = buffer.width == 1 ? 0
+                                     : (buffer.width - 1) * sx / (samples_x - 1);
+      const uint8_t* px = row + static_cast<size_t>(x) * 4;
+      if (px[0] > threshold || px[1] > threshold || px[2] > threshold) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 }  // namespace
@@ -337,6 +365,23 @@ int wmain(int argc, wchar_t* argv[]) {
             any_failure = true;
             ++global_index;
             continue;
+          }
+
+          if (IsLikelyBlackFrame(buffer)) {
+            logger.Info(L"Кадр DXGI выглядит пустым (почти черным), пробуем GDI.");
+            std::wstring gdi_error;
+            ImageBuffer gdi_buffer;
+            if (CaptureRectGdi(output.desc.DesktopCoordinates, &gdi_buffer,
+                               &gdi_error)) {
+              buffer = std::move(gdi_buffer);
+              logger.Info(L"Использован резервный путь GDI из-за черного кадра.");
+            } else {
+              logger.Error(L"Резервный путь GDI не удался: " + gdi_error +
+                           L" (код " + FormatWin32Error(GetLastError()) + L")");
+              any_failure = true;
+              ++global_index;
+              continue;
+            }
           }
 
           std::wstring filename = BuildFileName(
