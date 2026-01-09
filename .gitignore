@@ -1,0 +1,16 @@
+notouch.txt
+.env*
+
+build/
+out/
+.vs/
+*.user
+*.vcxproj.user
+*.pdb
+*.ilk
+*.obj
+*.exe
+*.dll
+*.lib
+*.exp
+*.log
