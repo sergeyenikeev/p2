@@ -66,7 +66,7 @@ int wmain(int argc, wchar_t* argv[]) {
   }
 
   std::wstring cmd = L"\"" + exe_path + L"\" --out \"" + temp_root +
-                     L"\" --test-image --simulate-displays 1";
+                     L"\" --test-image --simulate-displays 1 --count 1";
   DWORD exit_code = 1;
   if (!RunProcess(cmd, &exit_code)) {
     std::wcerr << L"Не удалось запустить процесс.\n";
