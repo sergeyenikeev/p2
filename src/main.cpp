@@ -17,6 +17,7 @@
 #include "encode_wic.h"
 #include "logging.h"
 #include "path_utils.h"
+#include "process_utils.h"
 #include "time_utils.h"
 #include "win_helpers.h"
 
@@ -30,14 +31,14 @@ struct Options {
   bool test_image = false;
   int simulate_displays = 0;
   bool out_dir_from_cwd = false;
-  int interval_seconds = 1;
+  int interval_seconds = 10;
   int capture_count = 0;
 };
 
 void PrintUsage() {
   std::wcerr
       << L"Использование:\n"
-      << L"  p2_screenshot [--out \"D:\\\\Screens\"] [--interval-seconds 1]\n"
+      << L"  p2_screenshot [--out \"D:\\\\Screens\"] [--interval-seconds 10]\n"
       << L"               [--count N] [--test-image] [--simulate-displays N]\n";
   std::wcerr << L"\n--out необязателен: по умолчанию используется текущая папка.\n";
   std::wcerr << L"--interval-seconds задает интервал между кадрами (>= 1).\n";
@@ -184,6 +185,27 @@ ImageBuffer MakeTestPattern(uint32_t width, uint32_t height, uint32_t seed) {
     }
   }
   return buffer;
+}
+
+FILETIME FileTimeNow() {
+  FILETIME ft = {};
+  GetSystemTimeAsFileTime(&ft);
+  return ft;
+}
+
+std::chrono::milliseconds FileTimeDiffMs(const FILETIME& start,
+                                         const FILETIME& end) {
+  ULARGE_INTEGER a = {};
+  ULARGE_INTEGER b = {};
+  a.LowPart = start.dwLowDateTime;
+  a.HighPart = start.dwHighDateTime;
+  b.LowPart = end.dwLowDateTime;
+  b.HighPart = end.dwHighDateTime;
+  if (b.QuadPart <= a.QuadPart) {
+    return std::chrono::milliseconds(0);
+  }
+  const unsigned long long diff_100ns = b.QuadPart - a.QuadPart;
+  return std::chrono::milliseconds(diff_100ns / 10000ULL);
 }
 
 bool IsLikelyBlackFrame(const ImageBuffer& buffer) {
@@ -341,6 +363,8 @@ int wmain(int argc, wchar_t* argv[]) {
   size_t total_outputs = 0;
   DxgiContext dxgi;
   std::vector<DisplayInfo> gdi_displays;
+  ProcessMap known_processes;
+  bool process_baseline_ready = false;
 
   if (options.test_image) {
     display_count = options.simulate_displays;
@@ -443,6 +467,82 @@ int wmain(int argc, wchar_t* argv[]) {
     }
 
     logger->Info(L"Цикл захвата: " + std::to_wstring(iteration + 1));
+
+    {
+      std::vector<ProcessInfo> snapshot;
+      std::wstring process_error;
+      if (SnapshotProcesses(&snapshot, &process_error)) {
+        ProcessMap current;
+        current.reserve(snapshot.size());
+        FILETIME now_ft = FileTimeNow();
+        for (auto& info : snapshot) {
+          if (!info.start_time_valid) {
+            info.start_time = now_ft;
+            info.start_time_valid = true;
+            info.start_time_approx = true;
+          }
+          current.emplace(info.pid, info);
+        }
+
+        if (!process_baseline_ready) {
+          known_processes = std::move(current);
+          process_baseline_ready = true;
+          logger->Info(L"Процессы: базовый снимок, всего " +
+                       std::to_wstring(known_processes.size()));
+        } else {
+          size_t added = 0;
+          size_t removed = 0;
+          for (const auto& [pid, info] : current) {
+            auto it = known_processes.find(pid);
+            if (it == known_processes.end()) {
+              std::wstring start_time = FormatFileTimeLocal(info.start_time);
+              std::wstring approx =
+                  info.start_time_approx ? L" (по времени обнаружения)" : L"";
+              logger->Info(L"Новый процесс: PID=" + std::to_wstring(pid) +
+                           L", имя=" + info.name + L", старт=" + start_time +
+                           approx);
+              ++added;
+            }
+          }
+
+          for (const auto& [pid, info] : known_processes) {
+            if (current.find(pid) == current.end()) {
+              FILETIME end_time = now_ft;
+              std::wstring end_time_str = FormatFileTimeLocal(end_time);
+              std::wstring start_time = FormatFileTimeLocal(info.start_time);
+              std::wstring runtime =
+                  FormatDuration(FileTimeDiffMs(info.start_time, end_time));
+              std::wstring approx =
+                  info.start_time_approx ? L" (по времени обнаружения)" : L"";
+              logger->Info(L"Процесс завершен: PID=" + std::to_wstring(pid) +
+                           L", имя=" + info.name + L", старт=" + start_time +
+                           approx + L", конец=" + end_time_str +
+                           L", время=" + runtime);
+              ++removed;
+            }
+          }
+
+          ProcessMap next_known;
+          next_known.reserve(current.size());
+          for (auto& [pid, info] : current) {
+            auto it = known_processes.find(pid);
+            if (it != known_processes.end()) {
+              ProcessInfo merged = it->second;
+              merged.name = info.name;
+              next_known.emplace(pid, merged);
+            } else {
+              next_known.emplace(pid, info);
+            }
+          }
+          known_processes.swap(next_known);
+          logger->Info(L"Процессы: всего " + std::to_wstring(known_processes.size()) +
+                       L", новых " + std::to_wstring(added) +
+                       L", завершенных " + std::to_wstring(removed));
+        }
+      } else {
+        logger->Error(L"Не удалось получить список процессов: " + process_error);
+      }
+    }
 
     if (options.test_image) {
       for (int i = 0; i < display_count; ++i) {

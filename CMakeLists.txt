@@ -14,6 +14,7 @@ add_library(p2_lib
   src/capture_gdi.cpp
   src/encode_wic.cpp
   src/logging.cpp
+  src/process_utils.cpp
   src/win_helpers.cpp
 )
 
