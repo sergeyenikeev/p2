@@ -187,6 +187,20 @@ ImageBuffer MakeTestPattern(uint32_t width, uint32_t height, uint32_t seed) {
   return buffer;
 }
 
+std::wstring GetExecutableDir() {
+  wchar_t buffer[MAX_PATH] = {};
+  DWORD len = GetModuleFileNameW(nullptr, buffer, ARRAYSIZE(buffer));
+  if (len == 0 || len >= ARRAYSIZE(buffer)) {
+    return L"";
+  }
+  std::wstring path(buffer, len);
+  size_t pos = path.find_last_of(L"\\/");
+  if (pos == std::wstring::npos) {
+    return L"";
+  }
+  return path.substr(0, pos);
+}
+
 FILETIME FileTimeNow() {
   FILETIME ft = {};
   GetSystemTimeAsFileTime(&ft);
@@ -272,8 +286,17 @@ int wmain(int argc, wchar_t* argv[]) {
   std::wstring computer = SanitizeName(computer_name);
   std::wstring user = SanitizeName(user_name);
   std::wstring pc_user = computer + L"_" + user;
+  std::wstring app_dir = GetExecutableDir();
+  if (app_dir.empty()) {
+    wchar_t cwd[MAX_PATH] = {};
+    DWORD len = GetCurrentDirectoryW(ARRAYSIZE(cwd), cwd);
+    if (len > 0 && len < ARRAYSIZE(cwd)) {
+      app_dir.assign(cwd, len);
+    }
+  }
 
-  std::unique_ptr<Logger> logger;
+  std::unique_ptr<Logger> main_logger;
+  std::unique_ptr<Logger> process_logger;
   OutputPaths paths;
   std::wstring current_date_key;
   bool header_logged = false;
@@ -294,51 +317,64 @@ int wmain(int argc, wchar_t* argv[]) {
 
     const std::wstring log_path =
         JoinPath(new_paths.day_dir, FormatDate(dt) + L".log");
-    auto new_logger = std::make_unique<Logger>(log_path);
-    if (!new_logger->IsOpen()) {
-      std::wcerr << L"Не удалось открыть лог-файл: " << log_path << L"\n";
+    auto new_process_logger = std::make_unique<Logger>(log_path);
+    if (!new_process_logger->IsOpen()) {
+      std::wcerr << L"Не удалось открыть лог процессов: " << log_path << L"\n";
+      return false;
+    }
+
+    std::wstring app_log_path = JoinPath(app_dir, FormatDate(dt) + L".log");
+    auto new_main_logger = std::make_unique<Logger>(app_log_path);
+    if (!new_main_logger->IsOpen()) {
+      std::wcerr << L"Не удалось открыть основной лог: " << app_log_path << L"\n";
       return false;
     }
 
     paths = new_paths;
-    logger = std::move(new_logger);
+    process_logger = std::move(new_process_logger);
+    main_logger = std::move(new_main_logger);
     current_date_key = FormatDate(dt);
 
     if (!header_logged) {
-      logger->Info(L"Старт программы.");
-      logger->Info(dpi_ok ? L"DPI-осведомленность включена (Per-Monitor V2)."
-                          : L"DPI-осведомленность: не удалось включить.");
+      main_logger->Info(L"Старт программы.");
+      main_logger->Info(dpi_ok ? L"DPI-осведомленность включена (Per-Monitor V2)."
+                               : L"DPI-осведомленность: не удалось включить.");
       if (options.out_dir_from_cwd) {
-        logger->Info(L"Путь --out не задан, используется текущая папка: " +
-                     options.out_dir);
+        main_logger->Info(L"Путь --out не задан, используется текущая папка: " +
+                          options.out_dir);
       }
       if (computer_err != 0) {
-        logger->Error(L"Не удалось получить имя компьютера: " +
-                      FormatWin32Error(computer_err));
+        main_logger->Error(L"Не удалось получить имя компьютера: " +
+                           FormatWin32Error(computer_err));
       }
       if (user_err != 0) {
-        logger->Error(L"Не удалось получить имя пользователя: " +
-                      FormatWin32Error(user_err));
+        main_logger->Error(L"Не удалось получить имя пользователя: " +
+                           FormatWin32Error(user_err));
       }
-      logger->Info(L"Выбранный корневой путь: " + paths.root);
-      logger->Info(L"Каталог пользователя: " + paths.pc_user_dir);
-      logger->Info(L"Интервал захвата, сек: " +
-                   std::to_wstring(options.interval_seconds));
+      main_logger->Info(L"Выбранный корневой путь: " + paths.root);
+      main_logger->Info(L"Каталог пользователя: " + paths.pc_user_dir);
+      if (!app_dir.empty()) {
+        main_logger->Info(L"Каталог приложения: " + app_dir);
+      }
+      main_logger->Info(L"Интервал захвата, сек: " +
+                        std::to_wstring(options.interval_seconds));
       if (options.capture_count > 0) {
-        logger->Info(L"Количество циклов: " +
-                     std::to_wstring(options.capture_count));
+        main_logger->Info(L"Количество циклов: " +
+                          std::to_wstring(options.capture_count));
       } else {
-        logger->Info(L"Количество циклов: бесконечно.");
+        main_logger->Info(L"Количество циклов: бесконечно.");
       }
+      main_logger->Info(L"Лог процессов: " + log_path);
       header_logged = true;
     } else {
-      logger->Info(L"Переход на новую дату, лог переключен.");
-      logger->Info(L"Выбранный корневой путь: " + paths.root);
-      logger->Info(L"Каталог пользователя: " + paths.pc_user_dir);
+      main_logger->Info(L"Переход на новую дату, лог переключен.");
+      main_logger->Info(L"Выбранный корневой путь: " + paths.root);
+      main_logger->Info(L"Каталог пользователя: " + paths.pc_user_dir);
+      main_logger->Info(L"Лог процессов: " + log_path);
     }
 
     for (const auto& dir : created_dirs) {
-      logger->Info(L"Создана папка: " + dir);
+      main_logger->Info(L"Создана папка: " + dir);
     }
     return true;
   };
@@ -350,7 +386,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
   HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   if (FAILED(hr)) {
-    logger->Error(L"Не удалось инициализировать COM: " + FormatHresult(hr) +
+    main_logger->Error(L"Не удалось инициализировать COM: " + FormatHresult(hr) +
                   L" - " + GetHresultMessage(hr));
     return 1;
   }
@@ -373,15 +409,15 @@ int wmain(int argc, wchar_t* argv[]) {
       display_count = static_cast<int>(detected.size());
     }
     if (display_count <= 0) {
-      logger->Error(L"Не удалось определить количество дисплеев.");
+      main_logger->Error(L"Не удалось определить количество дисплеев.");
       CoUninitialize();
       return 2;
     }
 
-    logger->Info(L"Включен тестовый режим. Будут созданы синтетические кадры.");
-    logger->Info(L"Количество дисплеев: " + std::to_wstring(display_count));
+    main_logger->Info(L"Включен тестовый режим. Будут созданы синтетические кадры.");
+    main_logger->Info(L"Количество дисплеев: " + std::to_wstring(display_count));
     for (int i = 0; i < display_count; ++i) {
-      logger->Info(L"Дисплей " + std::to_wstring(i + 1) +
+      main_logger->Info(L"Дисплей " + std::to_wstring(i + 1) +
                    L": синтетический 256x256, координаты [0,0,256,256]");
     }
   } else {
@@ -390,7 +426,7 @@ int wmain(int argc, wchar_t* argv[]) {
     auto dxgi_enum_start = std::chrono::steady_clock::now();
     dxgi_ok = InitializeDxgiContext(&dxgi, &dxgi_error, &dxgi_hr);
     auto dxgi_enum_end = std::chrono::steady_clock::now();
-    logger->Info(L"Время перечисления DXGI, мс: " +
+    main_logger->Info(L"Время перечисления DXGI, мс: " +
                  std::to_wstring(std::chrono::duration_cast<
                                      std::chrono::milliseconds>(dxgi_enum_end -
                                                                 dxgi_enum_start)
@@ -401,11 +437,11 @@ int wmain(int argc, wchar_t* argv[]) {
         total_outputs += adapter.outputs.size();
       }
       if (total_outputs == 0) {
-        logger->Error(L"DXGI выходы не найдены.");
+        main_logger->Error(L"DXGI выходы не найдены.");
         CoUninitialize();
         return 2;
       }
-      logger->Info(L"Найдено DXGI выходов: " +
+      main_logger->Info(L"Найдено DXGI выходов: " +
                    std::to_wstring(total_outputs));
 
       size_t global_index = 0;
@@ -414,7 +450,7 @@ int wmain(int argc, wchar_t* argv[]) {
           RECT rect = output.desc.DesktopCoordinates;
           int width = rect.right - rect.left;
           int height = rect.bottom - rect.top;
-          logger->Info(L"Дисплей " + std::to_wstring(global_index + 1) +
+          main_logger->Info(L"Дисплей " + std::to_wstring(global_index + 1) +
                        L": " + output.desc.DeviceName + L", " +
                        std::to_wstring(width) + L"x" +
                        std::to_wstring(height) + L", координаты " +
@@ -423,21 +459,21 @@ int wmain(int argc, wchar_t* argv[]) {
         }
       }
     } else {
-      logger->Error(L"DXGI недоступен, переход на GDI: " + dxgi_error +
+      main_logger->Error(L"DXGI недоступен, переход на GDI: " + dxgi_error +
                     L" (код " + FormatHresult(dxgi_hr) + L")");
       auto gdi_start = std::chrono::steady_clock::now();
       gdi_displays = EnumerateGdiDisplays();
       auto gdi_end = std::chrono::steady_clock::now();
-      logger->Info(L"Найдено GDI дисплеев: " +
+      main_logger->Info(L"Найдено GDI дисплеев: " +
                    std::to_wstring(gdi_displays.size()));
-      logger->Info(L"Время перечисления дисплеев, мс: " +
+      main_logger->Info(L"Время перечисления дисплеев, мс: " +
                    std::to_wstring(std::chrono::duration_cast<
                                        std::chrono::milliseconds>(gdi_end -
                                                                   gdi_start)
                                        .count()));
 
       if (gdi_displays.empty()) {
-        logger->Error(L"GDI дисплеи не найдены.");
+        main_logger->Error(L"GDI дисплеи не найдены.");
         CoUninitialize();
         return 2;
       }
@@ -445,7 +481,7 @@ int wmain(int argc, wchar_t* argv[]) {
       for (const auto& display : gdi_displays) {
         int width = display.rect.right - display.rect.left;
         int height = display.rect.bottom - display.rect.top;
-        logger->Info(L"Дисплей " + std::to_wstring(display.index + 1) +
+        main_logger->Info(L"Дисплей " + std::to_wstring(display.index + 1) +
                      L": " + display.name + L", " + std::to_wstring(width) +
                      L"x" + std::to_wstring(height) + L", координаты " +
                      RectToString(display.rect));
@@ -466,7 +502,7 @@ int wmain(int argc, wchar_t* argv[]) {
       }
     }
 
-    logger->Info(L"Цикл захвата: " + std::to_wstring(iteration + 1));
+    main_logger->Info(L"Цикл захвата: " + std::to_wstring(iteration + 1));
 
     {
       std::vector<ProcessInfo> snapshot;
@@ -487,8 +523,8 @@ int wmain(int argc, wchar_t* argv[]) {
         if (!process_baseline_ready) {
           known_processes = std::move(current);
           process_baseline_ready = true;
-          logger->Info(L"Процессы: базовый снимок, всего " +
-                       std::to_wstring(known_processes.size()));
+          process_logger->Info(L"Процессы: базовый снимок, всего " +
+                               std::to_wstring(known_processes.size()));
         } else {
           size_t added = 0;
           size_t removed = 0;
@@ -498,9 +534,10 @@ int wmain(int argc, wchar_t* argv[]) {
               std::wstring start_time = FormatFileTimeLocal(info.start_time);
               std::wstring approx =
                   info.start_time_approx ? L" (по времени обнаружения)" : L"";
-              logger->Info(L"Новый процесс: PID=" + std::to_wstring(pid) +
-                           L", имя=" + info.name + L", старт=" + start_time +
-                           approx);
+              process_logger->Info(L"Новый процесс: PID=" +
+                                   std::to_wstring(pid) + L", имя=" +
+                                   info.name + L", старт=" + start_time +
+                                   approx);
               ++added;
             }
           }
@@ -514,10 +551,10 @@ int wmain(int argc, wchar_t* argv[]) {
                   FormatDuration(FileTimeDiffMs(info.start_time, end_time));
               std::wstring approx =
                   info.start_time_approx ? L" (по времени обнаружения)" : L"";
-              logger->Info(L"Процесс завершен: PID=" + std::to_wstring(pid) +
-                           L", имя=" + info.name + L", старт=" + start_time +
-                           approx + L", конец=" + end_time_str +
-                           L", время=" + runtime);
+              process_logger->Info(
+                  L"Процесс завершен: PID=" + std::to_wstring(pid) + L", имя=" +
+                  info.name + L", старт=" + start_time + approx +
+                  L", конец=" + end_time_str + L", время=" + runtime);
               ++removed;
             }
           }
@@ -535,12 +572,15 @@ int wmain(int argc, wchar_t* argv[]) {
             }
           }
           known_processes.swap(next_known);
-          logger->Info(L"Процессы: всего " + std::to_wstring(known_processes.size()) +
-                       L", новых " + std::to_wstring(added) +
-                       L", завершенных " + std::to_wstring(removed));
+          process_logger->Info(
+              L"Процессы: всего " +
+              std::to_wstring(known_processes.size()) + L", новых " +
+              std::to_wstring(added) + L", завершенных " +
+              std::to_wstring(removed));
         }
       } else {
-        logger->Error(L"Не удалось получить список процессов: " + process_error);
+        process_logger->Error(
+            L"Не удалось получить список процессов: " + process_error);
       }
     }
 
@@ -570,14 +610,14 @@ int wmain(int argc, wchar_t* argv[]) {
 
         if (!saved) {
           any_failure = true;
-          logger->Error(L"Ошибка сохранения дисплея " +
+          main_logger->Error(L"Ошибка сохранения дисплея " +
                         std::to_wstring(i + 1) + L": " + save_error + L" (код " +
                         FormatHresult(save_hr) + L")");
           continue;
         }
 
-        logger->Info(L"Создан файл: " + filepath);
-        logger->Info(L"Время синтетического кадра, мс: " +
+        main_logger->Info(L"Создан файл: " + filepath);
+        main_logger->Info(L"Время синтетического кадра, мс: " +
                      std::to_wstring(capture_ms) +
                      L", кодирование, мс: " + std::to_wstring(encode_ms));
       }
@@ -592,18 +632,18 @@ int wmain(int argc, wchar_t* argv[]) {
           bool captured = CaptureDxgiOutput(adapter, output, &buffer,
                                             &capture_error, &capture_hr);
           if (!captured) {
-            logger->Error(L"DXGI захват дисплея " +
+            main_logger->Error(L"DXGI захват дисплея " +
                           std::to_wstring(global_index + 1) + L" не удался: " +
                           capture_error + L" (код " +
                           FormatHresult(capture_hr) + L")");
             std::wstring gdi_error;
             if (CaptureRectGdi(output.desc.DesktopCoordinates, &buffer,
                                &gdi_error)) {
-              logger->Info(L"Использован резервный путь GDI для дисплея " +
+              main_logger->Info(L"Использован резервный путь GDI для дисплея " +
                            std::to_wstring(global_index + 1));
               captured = true;
             } else {
-              logger->Error(L"Резервный путь GDI тоже не удался: " + gdi_error +
+              main_logger->Error(L"Резервный путь GDI тоже не удался: " + gdi_error +
                             L" (код " + FormatWin32Error(GetLastError()) + L")");
             }
           }
@@ -616,15 +656,15 @@ int wmain(int argc, wchar_t* argv[]) {
           }
 
           if (IsLikelyBlackFrame(buffer)) {
-            logger->Info(L"Кадр DXGI выглядит пустым (почти черным), пробуем GDI.");
+            main_logger->Info(L"Кадр DXGI выглядит пустым (почти черным), пробуем GDI.");
             std::wstring gdi_error;
             ImageBuffer gdi_buffer;
             if (CaptureRectGdi(output.desc.DesktopCoordinates, &gdi_buffer,
                                &gdi_error)) {
               buffer = std::move(gdi_buffer);
-              logger->Info(L"Использован резервный путь GDI из-за черного кадра.");
+              main_logger->Info(L"Использован резервный путь GDI из-за черного кадра.");
             } else {
-              logger->Error(L"Резервный путь GDI не удался: " + gdi_error +
+              main_logger->Error(L"Резервный путь GDI не удался: " + gdi_error +
                             L" (код " + FormatWin32Error(GetLastError()) + L")");
               any_failure = true;
               ++global_index;
@@ -653,7 +693,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
           if (!saved) {
             any_failure = true;
-            logger->Error(L"Ошибка сохранения дисплея " +
+            main_logger->Error(L"Ошибка сохранения дисплея " +
                           std::to_wstring(global_index + 1) + L": " +
                           save_error + L" (код " + FormatHresult(save_hr) +
                           L")");
@@ -661,8 +701,8 @@ int wmain(int argc, wchar_t* argv[]) {
             continue;
           }
 
-          logger->Info(L"Создан файл: " + filepath);
-          logger->Info(L"Время захвата, мс: " + std::to_wstring(capture_ms) +
+          main_logger->Info(L"Создан файл: " + filepath);
+          main_logger->Info(L"Время захвата, мс: " + std::to_wstring(capture_ms) +
                        L", кодирование, мс: " + std::to_wstring(encode_ms));
           ++global_index;
         }
@@ -676,7 +716,7 @@ int wmain(int argc, wchar_t* argv[]) {
         auto capture_end = std::chrono::steady_clock::now();
         if (!captured) {
           any_failure = true;
-          logger->Error(L"GDI захват дисплея " +
+          main_logger->Error(L"GDI захват дисплея " +
                         std::to_wstring(display.index + 1) +
                         L" не удался: " + capture_error + L" (код " +
                         FormatWin32Error(GetLastError()) + L")");
@@ -704,14 +744,14 @@ int wmain(int argc, wchar_t* argv[]) {
 
         if (!saved) {
           any_failure = true;
-          logger->Error(L"Ошибка сохранения дисплея " +
+          main_logger->Error(L"Ошибка сохранения дисплея " +
                         std::to_wstring(display.index + 1) + L": " +
                         save_error + L" (код " + FormatHresult(save_hr) + L")");
           continue;
         }
 
-        logger->Info(L"Создан файл: " + filepath);
-        logger->Info(L"Время захвата, мс: " + std::to_wstring(capture_ms) +
+        main_logger->Info(L"Создан файл: " + filepath);
+        main_logger->Info(L"Время захвата, мс: " + std::to_wstring(capture_ms) +
                      L", кодирование, мс: " + std::to_wstring(encode_ms));
       }
     }
@@ -734,9 +774,12 @@ int wmain(int argc, wchar_t* argv[]) {
   const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             total_end - total_start)
                             .count();
-  logger->Info(L"Общее время, мс: " + std::to_wstring(total_ms));
-  logger->Info(L"Завершение программы.");
-  logger->Flush();
+  main_logger->Info(L"Общее время, мс: " + std::to_wstring(total_ms));
+  main_logger->Info(L"Завершение программы.");
+  main_logger->Flush();
+  if (process_logger) {
+    process_logger->Flush();
+  }
 
   CoUninitialize();
   return any_failure ? 2 : 0;
