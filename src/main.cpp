@@ -49,7 +49,7 @@ void PrintUsage() {
       << L"Использование:\n"
       << L"  p2_screenshot [--out \"D:\\\\Screens\"] [--interval-seconds 10]\n"
       << L"               [--count N] [--test-image] [--simulate-displays N]\n";
-  std::wcerr << L"\n--out необязателен: по умолчанию используется текущая папка.\n";
+  std::wcerr << L"\n--out необязателен: по умолчанию используется подпапка p в текущей папке.\n";
   std::wcerr << L"--interval-seconds задает интервал между кадрами (>= 1).\n";
   std::wcerr << L"--count задает число циклов (0 = бесконечно).\n";
 }
@@ -154,7 +154,7 @@ bool ParseArgs(int argc, wchar_t* argv[], Options* options,
       }
       return false;
     }
-    options->out_dir.assign(cwd, len);
+    options->out_dir = JoinPath(std::wstring(cwd, len), L"p");
     options->out_dir_from_cwd = true;
   }
   if (options->simulate_displays < 0) {
@@ -396,7 +396,7 @@ int wmain(int argc, wchar_t* argv[]) {
       main_logger->Info(dpi_ok ? L"DPI-осведомленность включена (Per-Monitor V2)."
                                : L"DPI-осведомленность: не удалось включить.");
       if (options.out_dir_from_cwd) {
-        main_logger->Info(L"Путь --out не задан, используется текущая папка: " +
+        main_logger->Info(L"Путь --out не задан, используется подпапка p в текущей папке: " +
                           options.out_dir);
       }
       if (computer_err != 0) {
