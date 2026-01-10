@@ -1,7 +1,5 @@
 #include "logging.h"
 
-#include "win_helpers.h"
-
 namespace {
 
 std::wstring MakeTimestamp() {
@@ -23,9 +21,9 @@ Logger::Logger(const std::wstring& path) {
   }
   LARGE_INTEGER size = {};
   if (!GetFileSizeEx(file_, &size) || size.QuadPart == 0) {
-    const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
+    const wchar_t bom = 0xFEFF;
     DWORD written = 0;
-    WriteFile(file_, bom, sizeof(bom), &written, nullptr);
+    WriteFile(file_, &bom, sizeof(bom), &written, nullptr);
   }
   SetFilePointer(file_, 0, nullptr, FILE_END);
 }
@@ -57,16 +55,17 @@ void Logger::Flush() {
 void Logger::LogLine(const std::wstring& level,
                      const std::wstring& message) {
   std::wstring line = MakeTimestamp() + L" [" + level + L"] " + message;
-  WriteUtf8Line(line);
+  WriteUtf16Line(line);
 }
 
-bool Logger::WriteUtf8Line(const std::wstring& line) {
+bool Logger::WriteUtf16Line(const std::wstring& line) {
   if (file_ == INVALID_HANDLE_VALUE) {
     return false;
   }
-  std::string utf8 = WideToUtf8(line);
-  utf8.append("\r\n");
+  std::wstring output = line;
+  output.append(L"\r\n");
   DWORD written = 0;
-  return WriteFile(file_, utf8.data(), static_cast<DWORD>(utf8.size()),
-                   &written, nullptr) != FALSE;
+  const DWORD bytes =
+      static_cast<DWORD>(output.size() * sizeof(wchar_t));
+  return WriteFile(file_, output.data(), bytes, &written, nullptr) != FALSE;
 }

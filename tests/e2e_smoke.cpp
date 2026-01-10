@@ -100,10 +100,23 @@ int wmain(int argc, wchar_t* argv[]) {
     return 1;
   }
 
-  std::wstring log_path =
-      JoinPath(paths.day_dir, FormatDate(now) + L".log");
-  if (!std::filesystem::exists(log_path)) {
-    std::wcerr << L"Лог-файл не найден: " << log_path << L"\n";
+  std::wstring process_dir = JoinPath(paths.day_dir, L"p");
+  if (!std::filesystem::exists(process_dir)) {
+    std::wcerr << L"Папка логов процессов не найдена: " << process_dir << L"\n";
+    return 1;
+  }
+
+  bool has_process_log = false;
+  std::error_code log_ec;
+  for (const auto& entry :
+       std::filesystem::directory_iterator(process_dir, log_ec)) {
+    if (entry.path().extension() == L".txt") {
+      has_process_log = true;
+      break;
+    }
+  }
+  if (log_ec || !has_process_log) {
+    std::wcerr << L"Логи процессов не найдены.\n";
     return 1;
   }
 

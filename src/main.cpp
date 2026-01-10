@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -34,6 +35,14 @@ struct Options {
   int interval_seconds = 10;
   int capture_count = 0;
 };
+
+struct ProcessState {
+  ProcessInfo info;
+  int last_work_hour = -1;
+  std::wstring log_path;
+};
+
+using ProcessStateMap = std::unordered_map<DWORD, ProcessState>;
 
 void PrintUsage() {
   std::wcerr
@@ -187,6 +196,46 @@ ImageBuffer MakeTestPattern(uint32_t width, uint32_t height, uint32_t seed) {
   return buffer;
 }
 
+std::wstring FormatDateTimeStamp(const DateTimeParts& dt) {
+  wchar_t buffer[32] = {};
+  swprintf_s(buffer, L"%04d-%02d-%02d %02d:%02d:%02d", dt.year, dt.month,
+             dt.day, dt.hour, dt.minute, dt.second);
+  return buffer;
+}
+
+int MakeHourKey(const DateTimeParts& dt) {
+  return dt.year * 1000000 + dt.month * 10000 + dt.day * 100 + dt.hour;
+}
+
+std::wstring BuildProcessLogPath(const std::wstring& process_dir,
+                                 const ProcessInfo& info) {
+  std::wstring name = SanitizeName(info.name);
+  if (name.empty()) {
+    name = L"PROCESS";
+  }
+  std::wstring file =
+      name + L"_" + std::to_wstring(info.pid) + L".txt";
+  return JoinPath(process_dir, file);
+}
+
+bool WriteProcessEvent(const std::wstring& path, const std::wstring& timestamp,
+                       const std::wstring& event,
+                       const std::wstring* runtime,
+                       Logger* main_logger) {
+  std::wstring line = timestamp + L" | " + event;
+  if (runtime) {
+    line += L" | " + *runtime;
+  }
+  std::wstring error;
+  if (!AppendUtf16Line(path, line, &error)) {
+    if (main_logger) {
+      main_logger->Error(error);
+    }
+    return false;
+  }
+  return true;
+}
+
 std::wstring GetExecutableDir() {
   wchar_t buffer[MAX_PATH] = {};
   DWORD len = GetModuleFileNameW(nullptr, buffer, ARRAYSIZE(buffer));
@@ -296,9 +345,9 @@ int wmain(int argc, wchar_t* argv[]) {
   }
 
   std::unique_ptr<Logger> main_logger;
-  std::unique_ptr<Logger> process_logger;
   OutputPaths paths;
   std::wstring current_date_key;
+  std::wstring process_dir;
   bool header_logged = false;
 
   auto OpenLoggerForDate = [&](const DateTimeParts& dt) -> bool {
@@ -315,11 +364,18 @@ int wmain(int argc, wchar_t* argv[]) {
       return false;
     }
 
-    const std::wstring log_path =
-        JoinPath(new_paths.day_dir, FormatDate(dt) + L".log");
-    auto new_process_logger = std::make_unique<Logger>(log_path);
-    if (!new_process_logger->IsOpen()) {
-      std::wcerr << L"Не удалось открыть лог процессов: " << log_path << L"\n";
+    std::wstring new_process_dir = JoinPath(new_paths.day_dir, L"p");
+    DWORD attrs = GetFileAttributesW(new_process_dir.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+      if (!CreateDirectoryW(new_process_dir.c_str(), nullptr)) {
+        std::wcerr << L"Не удалось создать папку логов процессов: "
+                   << new_process_dir << L"\n";
+        return false;
+      }
+      created_dirs.push_back(new_process_dir);
+    } else if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+      std::wcerr << L"Путь логов процессов не является папкой: "
+                 << new_process_dir << L"\n";
       return false;
     }
 
@@ -331,9 +387,9 @@ int wmain(int argc, wchar_t* argv[]) {
     }
 
     paths = new_paths;
-    process_logger = std::move(new_process_logger);
     main_logger = std::move(new_main_logger);
     current_date_key = FormatDate(dt);
+    process_dir = std::move(new_process_dir);
 
     if (!header_logged) {
       main_logger->Info(L"Старт программы.");
@@ -364,13 +420,13 @@ int wmain(int argc, wchar_t* argv[]) {
       } else {
         main_logger->Info(L"Количество циклов: бесконечно.");
       }
-      main_logger->Info(L"Лог процессов: " + log_path);
+      main_logger->Info(L"Папка логов процессов: " + process_dir);
       header_logged = true;
     } else {
       main_logger->Info(L"Переход на новую дату, лог переключен.");
       main_logger->Info(L"Выбранный корневой путь: " + paths.root);
       main_logger->Info(L"Каталог пользователя: " + paths.pc_user_dir);
-      main_logger->Info(L"Лог процессов: " + log_path);
+      main_logger->Info(L"Папка логов процессов: " + process_dir);
     }
 
     for (const auto& dir : created_dirs) {
@@ -399,7 +455,7 @@ int wmain(int argc, wchar_t* argv[]) {
   size_t total_outputs = 0;
   DxgiContext dxgi;
   std::vector<DisplayInfo> gdi_displays;
-  ProcessMap known_processes;
+  ProcessStateMap known_processes;
   bool process_baseline_ready = false;
 
   if (options.test_image) {
@@ -500,6 +556,8 @@ int wmain(int argc, wchar_t* argv[]) {
         any_failure = true;
         break;
       }
+      known_processes.clear();
+      process_baseline_ready = false;
     }
 
     main_logger->Info(L"Цикл захвата: " + std::to_wstring(iteration + 1));
@@ -508,9 +566,15 @@ int wmain(int argc, wchar_t* argv[]) {
       std::vector<ProcessInfo> snapshot;
       std::wstring process_error;
       if (SnapshotProcesses(&snapshot, &process_error)) {
+        if (process_dir.empty()) {
+          main_logger->Error(L"Папка логов процессов не определена.");
+        }
         ProcessMap current;
         current.reserve(snapshot.size());
         FILETIME now_ft = FileTimeNow();
+        const int hour_key = MakeHourKey(cycle_time);
+        const std::wstring timestamp = FormatDateTimeStamp(cycle_time);
+
         for (auto& info : snapshot) {
           if (!info.start_time_valid) {
             info.start_time = now_ft;
@@ -521,65 +585,65 @@ int wmain(int argc, wchar_t* argv[]) {
         }
 
         if (!process_baseline_ready) {
-          known_processes = std::move(current);
+          known_processes.clear();
+          for (const auto& [pid, info] : current) {
+            ProcessState state;
+            state.info = info;
+            state.last_work_hour = hour_key;
+            state.log_path = BuildProcessLogPath(process_dir, info);
+            std::wstring runtime =
+                FormatDuration(FileTimeDiffMs(info.start_time, now_ft));
+            WriteProcessEvent(state.log_path, timestamp, L"работает", &runtime,
+                              main_logger.get());
+            known_processes.emplace(pid, std::move(state));
+          }
           process_baseline_ready = true;
-          process_logger->Info(L"Процессы: базовый снимок, всего " +
-                               std::to_wstring(known_processes.size()));
         } else {
-          size_t added = 0;
-          size_t removed = 0;
           for (const auto& [pid, info] : current) {
             auto it = known_processes.find(pid);
             if (it == known_processes.end()) {
-              std::wstring start_time = FormatFileTimeLocal(info.start_time);
-              std::wstring approx =
-                  info.start_time_approx ? L" (по времени обнаружения)" : L"";
-              process_logger->Info(L"Новый процесс: PID=" +
-                                   std::to_wstring(pid) + L", имя=" +
-                                   info.name + L", старт=" + start_time +
-                                   approx);
-              ++added;
-            }
-          }
-
-          for (const auto& [pid, info] : known_processes) {
-            if (current.find(pid) == current.end()) {
-              FILETIME end_time = now_ft;
-              std::wstring end_time_str = FormatFileTimeLocal(end_time);
-              std::wstring start_time = FormatFileTimeLocal(info.start_time);
-              std::wstring runtime =
-                  FormatDuration(FileTimeDiffMs(info.start_time, end_time));
-              std::wstring approx =
-                  info.start_time_approx ? L" (по времени обнаружения)" : L"";
-              process_logger->Info(
-                  L"Процесс завершен: PID=" + std::to_wstring(pid) + L", имя=" +
-                  info.name + L", старт=" + start_time + approx +
-                  L", конец=" + end_time_str + L", время=" + runtime);
-              ++removed;
-            }
-          }
-
-          ProcessMap next_known;
-          next_known.reserve(current.size());
-          for (auto& [pid, info] : current) {
-            auto it = known_processes.find(pid);
-            if (it != known_processes.end()) {
-              ProcessInfo merged = it->second;
-              merged.name = info.name;
-              next_known.emplace(pid, merged);
+              ProcessState state;
+              state.info = info;
+              state.last_work_hour = hour_key;
+              state.log_path = BuildProcessLogPath(process_dir, info);
+              WriteProcessEvent(state.log_path, timestamp, L"открыт", nullptr,
+                                main_logger.get());
+              known_processes.emplace(pid, std::move(state));
             } else {
-              next_known.emplace(pid, info);
+              it->second.info.name = info.name;
+              if (!it->second.info.start_time_valid && info.start_time_valid) {
+                it->second.info.start_time = info.start_time;
+                it->second.info.start_time_valid = true;
+              }
             }
           }
-          known_processes.swap(next_known);
-          process_logger->Info(
-              L"Процессы: всего " +
-              std::to_wstring(known_processes.size()) + L", новых " +
-              std::to_wstring(added) + L", завершенных " +
-              std::to_wstring(removed));
+
+          for (auto it = known_processes.begin();
+               it != known_processes.end();) {
+            if (current.find(it->first) == current.end()) {
+              std::wstring runtime =
+                  FormatDuration(FileTimeDiffMs(it->second.info.start_time,
+                                                now_ft));
+              WriteProcessEvent(it->second.log_path, timestamp, L"закрыт",
+                                &runtime, main_logger.get());
+              it = known_processes.erase(it);
+            } else {
+              ++it;
+            }
+          }
+
+          for (auto& [pid, state] : known_processes) {
+            if (state.last_work_hour != hour_key) {
+              std::wstring runtime =
+                  FormatDuration(FileTimeDiffMs(state.info.start_time, now_ft));
+              WriteProcessEvent(state.log_path, timestamp, L"работает",
+                                &runtime, main_logger.get());
+              state.last_work_hour = hour_key;
+            }
+          }
         }
       } else {
-        process_logger->Error(
+        main_logger->Error(
             L"Не удалось получить список процессов: " + process_error);
       }
     }
@@ -777,9 +841,6 @@ int wmain(int argc, wchar_t* argv[]) {
   main_logger->Info(L"Общее время, мс: " + std::to_wstring(total_ms));
   main_logger->Info(L"Завершение программы.");
   main_logger->Flush();
-  if (process_logger) {
-    process_logger->Flush();
-  }
 
   CoUninitialize();
   return any_failure ? 2 : 0;

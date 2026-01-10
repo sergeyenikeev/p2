@@ -3,7 +3,7 @@
 #include <string>
 #include <windows.h>
 
-// Logger writes UTF-8 with BOM and captures key stages.
+// Logger writes UTF-16LE with BOM and captures key stages.
 class Logger {
  public:
   // Input: log file path. Output: file opened for writing if possible.
@@ -23,7 +23,7 @@ class Logger {
 
  private:
   void LogLine(const std::wstring& level, const std::wstring& message);
-  bool WriteUtf8Line(const std::wstring& line);
+  bool WriteUtf16Line(const std::wstring& line);
 
   HANDLE file_ = INVALID_HANDLE_VALUE;
 };

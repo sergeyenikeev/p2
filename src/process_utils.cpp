@@ -106,3 +106,42 @@ std::wstring FormatDuration(std::chrono::milliseconds duration) {
   swprintf_s(buffer, L"%lld:%02lld:%02lld", hours, minutes, seconds);
   return buffer;
 }
+
+bool AppendUtf16Line(const std::wstring& path, const std::wstring& line,
+                     std::wstring* error) {
+  HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
+                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                            nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    if (error) {
+      *error = L"Не удалось открыть файл процесса: " + path;
+    }
+    return false;
+  }
+
+  LARGE_INTEGER size = {};
+  if (!GetFileSizeEx(file, &size)) {
+    CloseHandle(file);
+    if (error) {
+      *error = L"Не удалось получить размер файла процесса: " + path;
+    }
+    return false;
+  }
+  if (size.QuadPart == 0) {
+    const wchar_t bom = 0xFEFF;
+    DWORD written = 0;
+    WriteFile(file, &bom, sizeof(bom), &written, nullptr);
+  }
+
+  std::wstring output = line;
+  output.append(L"\r\n");
+  DWORD written = 0;
+  const DWORD bytes =
+      static_cast<DWORD>(output.size() * sizeof(wchar_t));
+  bool ok = WriteFile(file, output.data(), bytes, &written, nullptr) != FALSE;
+  CloseHandle(file);
+  if (!ok && error) {
+    *error = L"Не удалось записать строку в файл процесса: " + path;
+  }
+  return ok;
+}

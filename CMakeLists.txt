@@ -22,7 +22,7 @@ target_include_directories(p2_lib PUBLIC src)
 
 target_compile_definitions(p2_lib PUBLIC NOMINMAX _WIN32_WINNT=0x0A00)
 
-target_compile_options(p2_lib PRIVATE
+target_compile_options(p2_lib PUBLIC
   $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /utf-8>
 )
 

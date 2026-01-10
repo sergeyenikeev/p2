@@ -25,3 +25,7 @@ std::wstring FormatFileTimeLocal(const FILETIME& ft);
 
 // Formats duration as "HH:MM:SS" (hours may exceed 24).
 std::wstring FormatDuration(std::chrono::milliseconds duration);
+
+// Appends UTF-16LE line to file, creating it with BOM when needed.
+bool AppendUtf16Line(const std::wstring& path, const std::wstring& line,
+                     std::wstring* error);
