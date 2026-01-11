@@ -44,6 +44,59 @@ struct ProcessState {
 
 using ProcessStateMap = std::unordered_map<DWORD, ProcessState>;
 
+struct InstanceGuard {
+  HANDLE handle = nullptr;
+  ~InstanceGuard() {
+    if (handle) {
+      CloseHandle(handle);
+    }
+  }
+  InstanceGuard(const InstanceGuard&) = delete;
+  InstanceGuard& operator=(const InstanceGuard&) = delete;
+  InstanceGuard() = default;
+  InstanceGuard(InstanceGuard&& other) noexcept {
+    handle = other.handle;
+    other.handle = nullptr;
+  }
+  InstanceGuard& operator=(InstanceGuard&& other) noexcept {
+    if (this != &other) {
+      if (handle) {
+        CloseHandle(handle);
+      }
+      handle = other.handle;
+      other.handle = nullptr;
+    }
+    return *this;
+  }
+};
+
+bool AcquireSingleInstance(InstanceGuard* guard, bool* already_running,
+                           std::wstring* error) {
+  if (!guard || !already_running) {
+    if (error) {
+      *error = L"Внутренняя ошибка: отсутствует структура для mutex.";
+    }
+    return false;
+  }
+  *already_running = false;
+  const wchar_t* name = L"Local\\p2_screenshot_single_instance";
+  HANDLE handle = CreateMutexW(nullptr, FALSE, name);
+  DWORD last_error = GetLastError();
+  if (!handle) {
+    if (error) {
+      *error = L"Не удалось создать mutex экземпляра: " +
+               FormatWin32Error(last_error) + L" - " +
+               GetWin32ErrorMessage(last_error);
+    }
+    return false;
+  }
+  if (last_error == ERROR_ALREADY_EXISTS) {
+    *already_running = true;
+  }
+  guard->handle = handle;
+  return true;
+}
+
 void PrintUsage() {
   std::wcerr
       << L"Использование:\n"
@@ -342,6 +395,38 @@ int wmain(int argc, wchar_t* argv[]) {
     if (len > 0 && len < ARRAYSIZE(cwd)) {
       app_dir.assign(cwd, len);
     }
+  }
+
+  InstanceGuard instance_guard;
+  bool already_running = false;
+  std::wstring instance_error;
+  if (!AcquireSingleInstance(&instance_guard, &already_running,
+                             &instance_error)) {
+    std::wcerr << instance_error << L"\n";
+    return 1;
+  }
+  if (already_running) {
+    const std::wstring message =
+        L"Экземпляр приложения уже запущен, второй запуск отменен.";
+    std::wcerr << message << L"\n";
+    if (!app_dir.empty()) {
+      DateTimeParts now = NowLocal();
+      std::wstring log_path = JoinPath(app_dir, FormatDate(now) + L".log");
+      Logger temp_logger(log_path);
+      if (temp_logger.IsOpen()) {
+        temp_logger.Info(L"Старт программы.");
+        temp_logger.Error(message);
+        if (options.out_dir_from_cwd) {
+          temp_logger.Info(
+              L"Путь --out не задан, используется подпапка p в текущей папке: " +
+              options.out_dir);
+        } else {
+          temp_logger.Info(L"Выбранный корневой путь: " + options.out_dir);
+        }
+        temp_logger.Flush();
+      }
+    }
+    return 3;
   }
 
   std::unique_ptr<Logger> main_logger;
