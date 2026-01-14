@@ -35,7 +35,7 @@ target_link_libraries(p2_lib PUBLIC
   gdi32
 )
 
-add_executable(p2_screenshot src/main.cpp)
+add_executable(p2_screenshot WIN32 src/main.cpp)
 target_link_libraries(p2_screenshot PRIVATE p2_lib)
 
 enable_testing()

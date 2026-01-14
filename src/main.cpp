@@ -1,5 +1,6 @@
 #include <Windows.h>
 #include <Lmcons.h>
+#include <shellapi.h>
 
 #include <chrono>
 #include <cwchar>
@@ -353,9 +354,13 @@ bool IsLikelyBlackFrame(const ImageBuffer& buffer) {
 
 }  // namespace
 
-int wmain(int argc, wchar_t* argv[]) {
+int RunApp(int argc, wchar_t* argv[]) {
   SetConsoleOutputCP(CP_UTF8);
   SetConsoleCP(CP_UTF8);
+  HWND console = GetConsoleWindow();
+  if (console) {
+    ShowWindow(console, SW_HIDE);
+  }
 
   Options options;
   std::wstring parse_error;
@@ -929,4 +934,14 @@ int wmain(int argc, wchar_t* argv[]) {
 
   CoUninitialize();
   return any_failure ? 2 : 0;
+}
+
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+  int argc = 0;
+  wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  int result = RunApp(argc, argv);
+  if (argv) {
+    LocalFree(argv);
+  }
+  return result;
 }
